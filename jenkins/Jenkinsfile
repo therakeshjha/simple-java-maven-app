@@ -1,30 +1,90 @@
-pipeline {
-    agent any
+ import groovy.json.JsonSlurper
+ def deploymentStatus
+ def deploymentId
+ pipeline {
+     agent any
+     environment {
+         DM_AUTH = credentials('DM_AUTH')
+     }
     stages {
-        stage('Build') {
-            steps {
-                sh 'mvn -B -DskipTests clean package'
-            }
+        stage('Trigger Deployment') {
+            steps{
+                script {
+                    if(env.BranchName != ""){
+                        echo "Completing the merge deployment"
+                            resolveMergeDeployment(env.CallBackURL)
+                    }
+                    deploymentId = startDeployment(env.DeployPipelineId)
+                }
+            }   
         }
-        stage('Test') {
-            steps {
-                sh 'mvn test'
-            }
-            post {
-                always {
-                    junit 'target/surefire-reports/*.xml'
+
+        stage('Wait for deployment complete'){
+            steps{
+                waitUntil{
+                    script{
+                        deploymentStatus = getDeploymentStatus("Pipeline-CNVQW", deploymentId)
+                        if(deploymentStatus.contains("Resolved-")){
+                            return true
+                        }
+                        return false
+                    }
+                }
+                script{
+                    if(deploymentStatus.contains("Resolved-Aborted")){
+                        error('The deployment manager deployment was aborted')
+                    }    
                 }
             }
         }
-        stage('Deliver') {
-            steps {
-                sh './jenkins/scripts/deliver.sh'
+        stage('Collect deploment metrics'){
+            steps{
+                echo 'TODO'
+            }   
+        }
+    }
+}
+
+def getPipeline() {
+    def token = getToken();
+    def pipelineDef = sh(script: "curl --insecure -H \"Content-Type: application/json\" -H \"Accept: application/json\" -H \"Authorization:Bearer ${token}\" -k -X GET $OrchestratorURL/PRRestService/DeploymentManager/v1/pipelines/${pipelineId}",  returnStdout:true).trim()
+    return pipelineDef
+}
+
+def addStagesFromPipeline(){
+    def stagesJSON = getPipelineStages()
+    new JsonSlurper().parseText(stagesJSON).each { pipelineStage ->  
+        stage(pipelineStage.name) {
+            steps{
+                echo pipelineStage.name                                    
             }
         }
-        stage('Complete') {
-            steps {
-                echo 'Pipeline Finished'
-            }
-        }        
     }
+}
+
+def startDeployment(pipelineId){
+    def token = getToken();
+    deploymentId = sh(script: "curl -H \"Content-Type: application/json\" -H \"Accept: application/json\" -H \"Authorization:Bearer ${token}\" -k -X POST $OrchestratorURL/PRRestService/DeploymentManager/v1/pipelines/${pipelineId}/deployments | jq -r .deploymentID",  returnStdout:true).trim()
+    return deploymentId
+}
+
+def getDeployment(pipelineId, deploymentId){
+    def token = getToken();
+    deployment = sh(script:"curl -H \"Content-Type: application/json\" -H \"Accept: application/json\" -H \"Authorization:Bearer ${token}\" -k -X GET $OrchestratorURL/PRRestService/DeploymentManager/v1/pipelines/${pipelineId}/deployments/${deploymentId}",  returnStdout:true)
+    return deployment
+}
+
+def getDeploymentStatus(pipelineId, deploymentId){
+    deployment = getDeployment(pipelineId, deploymentId)
+    deploymentStatus = sh(script:"jq .status <<<'${deployment}'",  returnStdout:true)
+    return deploymentStatus
+}
+
+def getToken(){
+    sh(script: "curl -d \"client_id=$DM_AUTH_USR&client_secret=$DM_AUTH_PSW&grant_type=client_credentials\" $OrchestratorURL/PRRestService/oauth2/v1/token | jq -r .access_token",  returnStdout:true).trim()
+}
+
+def resolveMergeDeployment(CallBackURL){
+    def token = getToken();
+    sh(script:"curl -H \"Content-Type: application/json\" -H \"Accept: application/json\" -H \"Authorization:Bearer ${token}\" -k -X PUT --data '{\"taskStatus\":\"Resolved-Completed\",\"taskInfo\":{\"outputParameters\":[{\"name\": \"BuildNumber\",\"type\": \"Text\",\"value\": \"%BUILD_NUMBER%\"},{\"name\": \"JenkinsBuildURL\",\"type\": \"Text\",\"value\": \"%BUILD_URL%\"}]}}' ${CallBackURL}",  returnStdout:true)
 }
